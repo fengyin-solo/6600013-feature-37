@@ -1,39 +1,27 @@
 import { create } from 'zustand'
-import type { DesignParams, PatternType } from '../types'
+import type { DesignParams, PatternType, AutoCorrectLevel } from '../types'
 import { THEMES } from '../themes/palettes'
-import { PARAM_RANGES, clamp, isInRecommendedRange, MAX_EXPORT_SIZE } from '../types'
+import { sanitizeNumericParam, clamp, MAX_EXPORT_SIZE, PARAM_RANGES } from '../types'
+
+export interface ParamStatus {
+  level: AutoCorrectLevel
+  message: string
+  originalValue?: number
+  correctedTo?: number
+  overridden?: boolean
+}
 
 interface DesignStore extends DesignParams {
   svgContent: string
-  warnings: Record<string, string>
+  paramStatus: Record<string, ParamStatus>
   setParam: <K extends keyof DesignParams>(key: K, value: DesignParams[K]) => void
+  forceParam: <K extends keyof DesignParams>(key: K, value: DesignParams[K]) => void
   setPattern: (p: PatternType) => void
   setTheme: (id: string) => void
   randomSeed: () => void
   setSvgContent: (s: string) => void
-  clearWarning: (key: string) => void
   exportSvg: () => void
   exportPng: () => void
-}
-
-function sanitizeParam<K extends keyof DesignParams>(
-  key: K, value: DesignParams[K]
-): { value: DesignParams[K]; warning: string | null } {
-  if (typeof value !== 'number') {
-    return { value, warning: null }
-  }
-  const range = PARAM_RANGES[key as string]
-  if (!range) {
-    return { value, warning: null }
-  }
-  const clamped = clamp(value, range.min, range.max) as DesignParams[K]
-  let warning: string | null = null
-  if (clamped !== value) {
-    warning = `${key} 已自动修正到有效范围 [${range.min}, ${range.max}]`
-  } else if (!isInRecommendedRange(value, range) && range.recommended) {
-    warning = `${range.hint}，推荐范围 [${range.recommended.min}, ${range.recommended.max}]`
-  }
-  return { value: clamped, warning }
 }
 
 export const useDesignStore = create<DesignStore>((set, get) => ({
@@ -49,14 +37,48 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
   width: 800,
   height: 1000,
   svgContent: '',
-  warnings: {},
+  paramStatus: {},
+
   setParam: (key, value) => {
-    const { value: sanitized, warning } = sanitizeParam(key, value)
+    if (typeof value !== 'number') {
+      set({ [key]: value } as any)
+      return
+    }
+    const result = sanitizeNumericParam(key as string, value)
+    const status: ParamStatus = {
+      level: result.level,
+      message: result.message,
+    }
+    if (result.level === 'safe' || result.level === 'hard') {
+      status.originalValue = result.originalValue
+      status.correctedTo = result.correctedTo
+    }
     set((state) => ({
-      [key]: sanitized,
-      warnings: { ...state.warnings, [key]: warning || '' }
+      [key]: result.finalValue,
+      paramStatus: { ...state.paramStatus, [key]: status }
     }) as any)
   },
+
+  forceParam: (key, value) => {
+    if (typeof value !== 'number') {
+      set({ [key]: value } as any)
+      return
+    }
+    const range = PARAM_RANGES[key as string]
+    const finalValue = range ? clamp(value, range.min, range.max) : value
+    set((state) => ({
+      [key]: finalValue,
+      paramStatus: {
+        ...state.paramStatus,
+        [key]: {
+          level: 'warning',
+          message: `⚠️ 已强制使用原始值 ${finalValue}，超出安全范围，画面可能异常`,
+          overridden: true,
+        }
+      }
+    }) as any)
+  },
+
   setPattern: (p) => set({ pattern: p }),
   setTheme: (id) => {
     const theme = THEMES.find(t => t.id === id)
@@ -64,9 +86,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
   },
   randomSeed: () => set({ seed: Math.floor(Math.random() * 99999) }),
   setSvgContent: (s) => set({ svgContent: s }),
-  clearWarning: (key) => set((state) => ({
-    warnings: { ...state.warnings, [key]: '' }
-  })),
+
   exportSvg: () => {
     const { svgContent, width, height, seed } = get()
     if (width > MAX_EXPORT_SIZE || height > MAX_EXPORT_SIZE) {
@@ -79,6 +99,7 @@ export const useDesignStore = create<DesignStore>((set, get) => ({
     a.href = url; a.download = `art-${seed}.svg`; a.click()
     URL.revokeObjectURL(url)
   },
+
   exportPng: () => {
     const { svgContent, width, height, seed } = get()
     if (width > MAX_EXPORT_SIZE || height > MAX_EXPORT_SIZE) {
